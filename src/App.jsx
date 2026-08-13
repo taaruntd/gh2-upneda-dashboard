@@ -808,8 +808,275 @@ function KpiCard({ val, lbl, sub, col, bg }) {
   );
 }
 
+// ============================================================================
+// PROJECT DETAIL — journey bar + stage timeline for one project at a time.
+// Reuses the item-level Plan/Actual dates already in tracker.json — no new
+// Power Automate work needed. Each stage below is a *rollup* of existing
+// tracker items, not a new data source:
+//   Design & Engineering -> Design & Engineering tracker items
+//   Procurement (Supply) -> SCM tracker items
+//   Construction         -> Execution Tracker items, except WBS 4.3.x / 9.x
+//   Transmission Line    -> Execution Tracker items with WBS code starting "4.3"
+//   Commissioning        -> Execution Tracker items with WBS code starting "9"
+//   Handover              -> the "Final acceptance and handover" milestone
+//                            (currently unlinked/manual — see Milestone Payments)
+// ============================================================================
+
+const JOURNEY_STAGES = ["Project Won", "Design & Engineering", "Procurement", "Execution", "Commissioning", "Handover"];
+
+const STAGE_TIMELINE_CONFIG = [
+  { id: "design", label: "Design & Engineering", color: "#7B1FA2", light: "#F3E5F5", match: (it) => it.tracker === "Design & Engineering" },
+  { id: "procure", label: "Procurement (Supply)", color: "#1565C0", light: "#E3F2FD", match: (it) => it.tracker === "SCM" },
+  { id: "build", label: "Construction", color: "#E65100", light: "#FFF3E0", match: (it) => it.tracker === "Execution Tracker" && !(it.code || "").startsWith("4.3") && !(it.code || "").startsWith("9") },
+  { id: "trans", label: "Transmission Line", color: "#4A148C", light: "#EDE7F6", match: (it) => it.tracker === "Execution Tracker" && (it.code || "").startsWith("4.3") },
+  { id: "comm", label: "Commissioning", color: "#1B5E20", light: "#E8F5E9", match: (it) => it.tracker === "Execution Tracker" && (it.code || "").startsWith("9") },
+  { id: "hand", label: "Handover", color: "#006064", light: "#E0F7FA", match: (it) => it.tracker === "Milestone Payments" && it.name === "Final acceptance and handover" },
+];
+
+// A "done" status per tracker, used only to color a stage's completion pace.
+const DONE_STATUSES = new Set(["Approved", "GH2 Provided", "Completed", "Received", "Achieved"]);
+
+function computeStageRanges(projectItems) {
+  const today = new Date();
+  return STAGE_TIMELINE_CONFIG.map((stage) => {
+    const stageItems = projectItems.filter(stage.match);
+    const dated = stageItems
+      .map((it) => ({
+        start: parseDateStr(it.actualStart) || parseDateStr(it.planStart),
+        end: parseDateStr(it.actualEnd) || parseDateStr(it.planEnd),
+      }))
+      .filter((d) => d.start || d.end);
+    if (!dated.length) return { stage, hasData: false, itemCount: stageItems.length };
+
+    let start = dated.reduce((min, d) => (d.start && (!min || d.start < min) ? d.start : min), null);
+    let end = dated.reduce((max, d) => (d.end && (!max || d.end > max) ? d.end : max), null);
+    let estimated = false;
+    if (!start && end) { start = new Date(end.getTime() - 20 * 86400000); estimated = true; }
+    if (start && !end) { end = new Date(start.getTime() + 20 * 86400000); estimated = true; }
+
+    const doneCount = stageItems.filter((it) => DONE_STATUSES.has(it.status)).length;
+    const pct = stageItems.length ? Math.round((doneCount / stageItems.length) * 100) : 0;
+
+    const isDelayed = !estimated && end < today && pct < 100;
+    let isAtRisk = false;
+    if (!estimated && !isDelayed && today >= start && today <= end) {
+      const span = end.getTime() - start.getTime();
+      const pctTimeUsed = span > 0 ? ((today.getTime() - start.getTime()) / span) * 100 : 0;
+      isAtRisk = pctTimeUsed - pct >= 20;
+    }
+    return { stage, hasData: true, itemCount: stageItems.length, start, end, estimated, pct, isDelayed, isAtRisk };
+  });
+}
+
+function ProjectJourney({ project }) {
+  const idx = JOURNEY_STAGES.indexOf(project.stage);
+  return (
+    <div style={{ padding: "14px 20px", background: "#fff", border: `1px solid ${B.border}`, borderRadius: 12, marginBottom: 16 }}>
+      <div style={{ fontSize: 10, color: B.muted, letterSpacing: 1, marginBottom: 8 }}>PROJECT JOURNEY</div>
+      <div style={{ display: "flex", gap: 3, marginBottom: 4 }}>
+        {JOURNEY_STAGES.map((lane, i) => {
+          const isPast = i < idx, isCur = i === idx;
+          const col = TRACKER_COLOR[lane] || B.blue;
+          return (
+            <div key={lane} style={{ flex: 1 }}>
+              <div style={{ height: 7, borderRadius: 4, background: isCur ? B.blue : isPast ? B.olive : "#e0e0e0", marginBottom: 3 }} />
+              {isCur && <div style={{ fontSize: 8, color: B.blue, fontWeight: 700, textAlign: "center" }}>▼</div>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 9, color: B.muted }}>Project Won</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: B.blue }}>{project.stage || "—"}</span>
+        <span style={{ fontSize: 9, color: B.muted }}>Handover</span>
+      </div>
+    </div>
+  );
+}
+
+function StageTimeline({ ranges }) {
+  const dated = ranges.filter((r) => r.hasData);
+  if (!dated.length) {
+    return (
+      <div style={{ background: "#fff", border: `1px solid ${B.border}`, borderRadius: 12, padding: "14px 16px", fontSize: 11, color: B.muted, fontStyle: "italic" }}>
+        No task-level dates on file yet for this project — fill Plan/Actual dates in the tracker to see a stage timeline here.
+      </div>
+    );
+  }
+  const today = new Date();
+  const allDates = dated.flatMap((r) => [r.start, r.end]);
+  const axisStart = new Date(Math.min(...allDates.map((d) => d.getTime()), today.getTime()) - 10 * 86400000);
+  const axisEnd = new Date(Math.max(...allDates.map((d) => d.getTime()), today.getTime()) + 10 * 86400000);
+  const total = axisEnd.getTime() - axisStart.getTime();
+  const pctOf = (d) => Math.min(100, Math.max(0, ((d.getTime() - axisStart.getTime()) / total) * 100));
+  const todayPct = pctOf(today);
+
+  const ticks = [];
+  const cursor = new Date(axisStart.getFullYear(), axisStart.getMonth(), 1);
+  let lastPct = -Infinity;
+  while (cursor <= axisEnd) {
+    const p = pctOf(cursor);
+    if (p - lastPct >= 9) { ticks.push(new Date(cursor)); lastPct = p; }
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${B.border}`, borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ padding: "10px 16px", borderBottom: `1px solid ${B.border}`, fontSize: 11, color: B.muted }}>
+        Derived from Plan/Actual dates already in each tracker — not a separate data entry.{" "}
+        <strong style={{ color: "#c0392b" }}>Red hatched</strong> = past its end date and not finished.{" "}
+        <strong style={{ color: "#c8850a" }}>Amber dashed</strong> = within its window but behind pace.
+      </div>
+      <div style={{ padding: "16px 20px 20px", overflowX: "auto" }}>
+        <div style={{ display: "flex", position: "relative", height: 22, borderBottom: `1px solid ${B.border}`, marginLeft: 190, marginBottom: 8 }}>
+          {ticks.map((m, i) => (
+            <div key={i} style={{ position: "absolute", left: `${pctOf(m)}%`, borderLeft: `1px solid ${B.border}`, paddingLeft: 5, fontSize: 10, fontWeight: 600, color: B.muted, whiteSpace: "nowrap" }}>
+              {m.toLocaleDateString("en-IN", { month: "short", year: "2-digit" })}
+            </div>
+          ))}
+        </div>
+        {ranges.map((r) => {
+          const { stage } = r;
+          if (!r.hasData) {
+            return (
+              <div key={stage.id} style={{ display: "flex", alignItems: "center", minHeight: 36 }}>
+                <div style={{ width: 190, flexShrink: 0, fontSize: 12, fontWeight: 700, color: B.muted, paddingRight: 10 }}>{stage.label}</div>
+                <div style={{ flex: 1, fontSize: 10, color: B.muted, fontStyle: "italic" }}>
+                  {r.itemCount ? "No dates on file yet" : "No matching items in this tracker"}
+                </div>
+              </div>
+            );
+          }
+          const left = pctOf(r.start);
+          const width = Math.max(2, pctOf(r.end) - pctOf(r.start));
+          const rowColor = r.isDelayed ? "#c0392b" : r.isAtRisk ? "#c8850a" : stage.color;
+          const delayDays = r.isDelayed ? Math.round((today.getTime() - r.end.getTime()) / 86400000) : 0;
+          const delayLeft = pctOf(r.end);
+          const delayWidth = r.isDelayed ? Math.max(1, todayPct - delayLeft) : 0;
+          return (
+            <div key={stage.id} style={{ display: "flex", alignItems: "center", minHeight: 44 }}>
+              <div style={{ width: 190, flexShrink: 0, fontSize: 12, fontWeight: 700, color: rowColor, paddingRight: 10, display: "flex", alignItems: "center", gap: 4 }}>
+                {stage.label}
+                {r.isDelayed && <span title={`${delayDays}d overdue`}>⚠</span>}
+                {r.isAtRisk && <span title="Behind pace">⏱</span>}
+              </div>
+              <div style={{ flex: 1, position: "relative", height: 34 }}>
+                <div style={{ position: "absolute", left: `${todayPct}%`, top: -4, bottom: -4, width: 1, background: B.blue, opacity: 0.4 }} />
+                <div
+                  title={`${fmtShortDate(r.start)} → ${fmtShortDate(r.end)}${r.estimated ? " (estimated)" : ""} · ${r.pct}% items done`}
+                  style={{
+                    position: "absolute", left: `${left}%`, width: `${width}%`, top: 5, height: 22,
+                    borderRadius: r.isDelayed ? "6px 0 0 6px" : 6,
+                    background: r.isAtRisk ? "#fdf0d5" : stage.light,
+                    border: `2px ${r.estimated || r.isAtRisk ? "dashed" : "solid"} ${r.isAtRisk ? "#c8850a" : r.isDelayed ? "#c0392b" : stage.color}`,
+                    borderRight: r.isDelayed ? "none" : undefined,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 11, fontWeight: 700, color: rowColor, whiteSpace: "nowrap", overflow: "hidden",
+                  }}
+                >
+                  {fmtShortDate(r.start)} → {fmtShortDate(r.end)}
+                </div>
+                {r.isDelayed && (
+                  <div
+                    title={`${delayDays}d overdue`}
+                    style={{
+                      position: "absolute", left: `${delayLeft}%`, width: `${delayWidth}%`, top: 5, height: 22,
+                      borderRadius: "0 6px 6px 0",
+                      background: "repeating-linear-gradient(45deg, #fef2f2, #fef2f2 4px, #fecaca 4px, #fecaca 8px)",
+                      border: "2px solid #c0392b", borderLeft: "none",
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ProjectDetail({ projects, items }) {
+  const [code, setCode] = useState(projects[0]?.code || "");
+  const project = projects.find((p) => p.code === code);
+  const projectItems = useMemo(() => items.filter((it) => it.projectCode === code), [items, code]);
+  const ranges = useMemo(() => computeStageRanges(projectItems), [projectItems]);
+
+  if (!project) {
+    return <div style={{ padding: 20, fontSize: 12, color: B.muted }}>No projects on file yet.</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16 }}>
+        <select value={code} onChange={(e) => setCode(e.target.value)} style={selStyle}>
+          {projects.map((p) => (
+            <option key={p.code} value={p.code}>{p.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div style={{ width: 10, height: 10, borderRadius: "50%", background: project.category === "GH2" ? B.blue : B.olive, flexShrink: 0 }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 2 }}>
+            <span style={{ fontSize: 10, color: B.muted }}>{project.code}</span>
+            <span style={{ fontSize: 10, padding: "1px 8px", borderRadius: 10, background: (project.category === "GH2" ? B.blue : B.olive) + "25", color: project.category === "GH2" ? B.blue : B.olive, fontWeight: 700 }}>
+              {project.type || project.category}
+            </span>
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: B.text }}>{project.name}</div>
+        </div>
+        <span style={{ fontSize: 12, background: B.greenL, color: "#0d7a32", border: "1px solid #86d9a0", padding: "4px 12px", borderRadius: 20, fontWeight: 600 }}>
+          {project.status || "—"}
+        </span>
+      </div>
+
+      <ProjectJourney project={project} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
+        <SmallCard label="Size" value={project.capacityKwp ? `${project.capacityKwp.toLocaleString("en-IN")} kWp` : "—"} accent={B.olive} />
+        <SmallCard label="Stage" value={project.stage || "—"} accent={B.blue} />
+        <SmallCard label="Client" value={project.client || "—"} accent={B.green} />
+        <SmallCard label="Contract End" value={dispDate(project.contractEnd)} accent="#E65100" />
+      </div>
+
+      <div style={{ padding: "16px 20px", background: "#fff", border: `1px solid ${B.border}`, borderLeft: `3px solid ${pctCol(project.execPct * 100 || 0)}`, borderRadius: 12, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{ fontSize: 9, fontWeight: 700, color: B.muted, textTransform: "uppercase", letterSpacing: ".08em" }}>Overall completion</span>
+          <span style={{ fontSize: 22, fontWeight: 700, fontFamily: "monospace", color: pctCol((project.execPct || 0) * 100) }}>
+            {Math.round((project.execPct || 0) * 100)}%
+          </span>
+        </div>
+        <div style={{ height: 10, background: "#e0e0e0", borderRadius: 6, overflow: "hidden" }}>
+          <div style={{ height: 10, borderRadius: 6, width: `${(project.execPct || 0) * 100}%`, background: pctCol((project.execPct || 0) * 100) }} />
+        </div>
+      </div>
+
+      {project.remarks && project.remarks !== "-" && (
+        <div style={{ padding: "10px 14px", background: "#fef2f2", border: "1px solid #f5a5a5", borderRadius: 10, marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#c0392b" }}>REMARKS</div>
+          <div style={{ fontSize: 12, color: "#922b21", marginTop: 2 }}>{project.remarks}</div>
+        </div>
+      )}
+
+      <StageTimeline ranges={ranges} />
+    </div>
+  );
+}
+
+function SmallCard({ label, value, accent }) {
+  return (
+    <div style={{ background: B.bg, borderRadius: 10, border: `1px solid ${accent}22`, borderLeft: `3px solid ${accent}`, padding: "11px 14px" }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: B.muted, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 5 }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: B.text, lineHeight: 1.2 }}>{value}</div>
+    </div>
+  );
+}
+
 export default function App() {
   const { projects, items, lastUpdated, loading, error } = useTrackerData();
+  const [page, setPage] = useState("explorer"); // explorer | detail
 
   const totalItems = items.length;
   const delayedCount = items.filter((i) => typeof i.delayDays === "number" && i.delayDays > 0).length;
@@ -852,8 +1119,25 @@ export default function App() {
           </div>
           <div>
             <div style={{ fontSize: 10, color: B.muted, letterSpacing: 1 }}>UPNEDA TRACKER</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: B.text }}>Schedule Explorer</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: B.text }}>{page === "explorer" ? "Schedule Explorer" : "Project Detail"}</div>
           </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 2, background: B.oliveL, borderRadius: 8, padding: 3 }}>
+          {[["explorer", "Schedule Explorer"], ["detail", "Project Detail"]].map(([v, l]) => (
+            <button
+              key={v}
+              onClick={() => setPage(v)}
+              style={{
+                padding: "6px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontFamily: "inherit",
+                background: page === v ? "#fff" : "transparent",
+                color: page === v ? B.text : B.muted,
+                fontSize: 12, fontWeight: page === v ? 700 : 500,
+              }}
+            >
+              {l}
+            </button>
+          ))}
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
@@ -883,14 +1167,19 @@ export default function App() {
         </div>
       ) : (
         <div style={{ padding: 20, maxWidth: 1280, margin: "0 auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
-            <KpiCard val={projects.length} lbl="Projects" sub="UPNEDA sites" col={B.olive} bg={B.oliveL} />
-            <KpiCard val={totalItems} lbl="Tracked Items" sub="Design + SCM + Execution" col={B.blue} bg={B.blueL} />
-            <KpiCard val={withDates} lbl="With Dates On File" sub={`of ${totalItems} items`} col={B.green} bg={B.greenL} />
-            <KpiCard val={delayedCount} lbl="Delayed Items" sub="Needs attention" col="#c0392b" bg="#fef2f2" />
-          </div>
-
-          <GanttExplorer items={items} projects={projects} />
+          {page === "explorer" ? (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
+                <KpiCard val={projects.length} lbl="Projects" sub="UPNEDA sites" col={B.olive} bg={B.oliveL} />
+                <KpiCard val={totalItems} lbl="Tracked Items" sub="Design + SCM + Execution + Milestones" col={B.blue} bg={B.blueL} />
+                <KpiCard val={withDates} lbl="With Dates On File" sub={`of ${totalItems} items`} col={B.green} bg={B.greenL} />
+                <KpiCard val={delayedCount} lbl="Delayed Items" sub="Needs attention" col="#c0392b" bg="#fef2f2" />
+              </div>
+              <GanttExplorer items={items} projects={projects} />
+            </>
+          ) : (
+            <ProjectDetail projects={projects} items={items} />
+          )}
         </div>
       )}
     </div>
