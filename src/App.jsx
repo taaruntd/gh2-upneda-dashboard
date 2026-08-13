@@ -63,6 +63,11 @@ const TRACKER_LIGHT = {
 // ── Date helpers (same parsing contract as the ops dashboard) ──────────────
 const parseDateStr = (s) => {
   if (s === null || s === undefined || s === "") return null;
+  // Excel date cell as a genuine number (rare via this pipeline, but cheap to handle)
+  if (typeof s === "number") {
+    const d = new Date(Date.UTC(1899, 11, 30) + s * 86400000);
+    return isNaN(d.getTime()) ? null : d;
+  }
   if (typeof s !== "string") return null;
   const clean = s.trim();
   if (!clean || clean.toLowerCase() === "tbd" || clean === "-") return null;
@@ -71,7 +76,20 @@ const parseDateStr = (s) => {
     return isNaN(d.getTime()) ? null : d;
   }
   const sep = clean.includes("/") ? "/" : clean.includes("-") ? "-" : null;
-  if (!sep) return null;
+  if (!sep) {
+    // Excel serial number sent as JSON *text* (e.g. "46242") — this is what
+    // Power Automate actually sends for Date-formatted cells on this pipeline,
+    // confirmed against the live payload. Serials in ~40000-60000 cover
+    // roughly 2009-2064, the only realistic window for project dates here.
+    if (/^\d{4,6}$/.test(clean)) {
+      const n = Number(clean);
+      if (n >= 40000 && n <= 60000) {
+        const d = new Date(Date.UTC(1899, 11, 30) + n * 86400000);
+        return isNaN(d.getTime()) ? null : d;
+      }
+    }
+    return null;
+  }
   const p = clean.split(sep).map((x) => x.trim());
   if (p.length !== 3) return null;
   const [dd, mm, yyyy] = p;
@@ -111,8 +129,20 @@ const DATA_URL = "/data/tracker.json";
 // { lastUpdated, projectKey: [...], design: [...], scm: [...], execution: [...] }
 // Each row object is keyed by its literal Excel column header.
 
-const num = (v) => (v === "" || v === null || v === undefined ? null : Number(v)) ?? null;
+const num = (v) => {
+  if (v === "" || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isNaN(n) ? null : n; // handles "-" and "TBD" placeholders from the sheet
+};
 const str = (v) => (v === "" || v === null || v === undefined ? null : String(v));
+// SharePoint/Power Automate encodes "." in column internal names as "_x002e_"
+// (so a column literally named "S.No." shows up in the JSON as "S_x002e_No_x002e_").
+// Try both forms so this keeps working regardless of exactly how the connector names it.
+const field = (r, key) => {
+  if (r[key] !== undefined) return r[key];
+  const encoded = key.replace(/\./g, "_x002e_");
+  return r[encoded] !== undefined ? r[encoded] : undefined;
+};
 
 function mapProjects(rows) {
   return (rows || []).map((r) => ({
@@ -136,10 +166,10 @@ function mapProjects(rows) {
 
 function mapDesign(rows) {
   return (rows || []).map((r) => ({
-    id: `design-${r["Project Code"]}-${r["S.No."]}`,
+    id: `design-${r["Project Code"]}-${field(r, "S.No.")}`,
     tracker: "Design & Engineering",
     projectCode: str(r["Project Code"]),
-    sno: num(r["S.No."]),
+    sno: num(field(r, "S.No.")),
     code: str(r["Drawing Number"]),
     name: str(r["Docs Name"]),
     docType: str(r["Docs Type"]),
@@ -157,10 +187,10 @@ function mapDesign(rows) {
 
 function mapScm(rows) {
   return (rows || []).map((r) => ({
-    id: `scm-${r["Project Code"]}-${r["S.No."]}`,
+    id: `scm-${r["Project Code"]}-${field(r, "S.No.")}`,
     tracker: "SCM",
     projectCode: str(r["Project Code"]),
-    sno: num(r["S.No."]),
+    sno: num(field(r, "S.No.")),
     code: str(r["Item Code"]),
     name: str(r["Item Name"]),
     group: str(r["Item Group"]),
@@ -181,10 +211,10 @@ function mapScm(rows) {
 
 function mapExecution(rows) {
   return (rows || []).map((r) => ({
-    id: `exec-${r["Project Code"]}-${r["S.No."]}`,
+    id: `exec-${r["Project Code"]}-${field(r, "S.No.")}`,
     tracker: "Execution Tracker",
     projectCode: str(r["Project Code"]),
-    sno: num(r["S.No."]),
+    sno: num(field(r, "S.No.")),
     code: str(r["WBS Code"]),
     name: str(r["Activity Name"]),
     uom: str(r["UOM"]),
@@ -217,10 +247,10 @@ function mapMilestonePayments(rows) {
     const delayDays = num(r["Delay (Days)"]);
     const status = actualEnd ? "Achieved" : delayDays > 0 ? "Overdue" : "Pending";
     return {
-      id: `milestone-${r["Project Code"]}-${r["S.No"]}`,
+      id: `milestone-${r["Project Code"]}-${field(r, "S.No")}`,
       tracker: "Milestone Payments",
       projectCode: str(r["Project Code"]),
-      sno: num(r["S.No"]),
+      sno: num(field(r, "S.No")),
       code: str(r["Cost Category"]),
       name: str(r["Milestone"]),
       payPct: num(r["Pay %"]),
