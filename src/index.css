@@ -1,0 +1,13 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+select:focus,
+input:focus,
+button:focus-visible {
+  outline: 2px solid #3e5ba6;
+  outline-offset: 1px;
+}
