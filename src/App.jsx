@@ -238,6 +238,32 @@ function mapMilestonePayments(rows) {
   });
 }
 
+// Manpower & Machinery has a different shape (Planned/Actual Qty, Mobilization/
+// Demobilization dates) rather than Plan/Actual pairs — mapped loosely onto the
+// same item shape so it can sit in the Project Detail summary alongside the
+// other trackers. Not added to the Schedule Explorer's tracker filter since its
+// fields don't mean the same thing as TAT/Delay elsewhere.
+function mapManpower(rows) {
+  return (rows || []).map((r, idx) => ({
+    id: `manpower-${r["Project Code"]}-${idx}`,
+    tracker: "Manpower & Machinery",
+    projectCode: str(r["Project Code"]),
+    code: str(r["Resource Category"]),
+    name: str(r["Role / Equipment Type"]),
+    vendor: str(r["Vendor / Agency"]),
+    plannedQty: num(r["Planned Qty"]),
+    actualQty: num(r["Actual Deployed Qty"]),
+    status: str(r["Status"]),
+    planStart: null,
+    planEnd: str(r["Demobilization Date (Plan)"]),
+    actualStart: str(r["Mobilization Date"]),
+    actualEnd: null,
+    tatDays: num(r["Duration (Days)"]),
+    delayDays: null,
+    remarks: str(r["Remarks"]),
+  }));
+}
+
 // Accepts either the raw Power Automate shape (projectKey/design/scm/execution/milestonePayments)
 // or the already-flat shape (projects/items) — so local dev against the static
 // tracker.json snapshot keeps working without changes.
@@ -249,6 +275,7 @@ function normalize(raw) {
     items: [
       ...mapDesign(raw.design),
       ...mapScm(raw.scm),
+      ...mapManpower(raw.manpower),
       ...mapExecution(raw.execution),
       ...mapMilestonePayments(raw.milestonePayments),
     ],
@@ -834,7 +861,7 @@ const STAGE_TIMELINE_CONFIG = [
 ];
 
 // A "done" status per tracker, used only to color a stage's completion pace.
-const DONE_STATUSES = new Set(["Approved", "GH2 Provided", "Completed", "Received", "Achieved"]);
+const DONE_STATUSES = new Set(["Approved", "GH2 Provided", "Completed", "Received", "Achieved", "Mobilized", "Demobilized"]);
 
 function computeStageRanges(projectItems) {
   const today = new Date();
@@ -1033,6 +1060,8 @@ function ProjectDetail({ projects, items }) {
       </div>
 
       <ProjectJourney project={project} />
+
+      <TrackerSummary projectItems={projectItems} />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
         <SmallCard label="Size" value={project.capacityKwp ? `${project.capacityKwp.toLocaleString("en-IN")} kWp` : "—"} accent={B.olive} />
