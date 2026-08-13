@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 // ============================================================================
 // THEME — GH2 Solar brand tokens and date helpers (was styles/theme.js)
@@ -1053,11 +1053,162 @@ function StageTimeline({ ranges }) {
   );
 }
 
+// ── TRACKER SUMMARY + DETAIL DRILL-DOWN ─────────────────────────────────────
+// Click a card to expand the full line-item list for that tracker below it —
+// every row in the sheet for this project, with its own dates/TAT/%/status,
+// not just the aggregate count.
+const ALL_TRACKERS_FOR_SUMMARY = ["Design & Engineering", "SCM", "Manpower & Machinery", "Execution Tracker", "Milestone Payments"];
+
+function TrackerSummary({ projectItems, selected, onSelect }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: B.muted, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 8 }}>
+        Overall Journey — all trackers for this project (click a card for full line items)
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10 }}>
+        {ALL_TRACKERS_FOR_SUMMARY.map((trackerName) => {
+          const trackerItems = projectItems.filter((it) => it.tracker === trackerName);
+          const total = trackerItems.length;
+          const done = trackerItems.filter((it) => DONE_STATUSES.has(it.status)).length;
+          const delayed = trackerItems.filter((it) => typeof it.delayDays === "number" && it.delayDays > 0).length;
+          const pct = total ? Math.round((done / total) * 100) : 0;
+          const color = TRACKER_COLOR[trackerName] || B.blue;
+          const light = TRACKER_LIGHT[trackerName] || B.blueL;
+          const isSel = selected === trackerName;
+          return (
+            <div
+              key={trackerName}
+              onClick={() => onSelect(isSel ? null : trackerName)}
+              style={{
+                background: isSel ? light : "#fff",
+                border: `1px solid ${isSel ? color : B.border}`,
+                borderLeft: `3px solid ${color}`,
+                borderRadius: 10,
+                padding: "11px 12px",
+                cursor: total ? "pointer" : "default",
+              }}
+            >
+              <div style={{ fontSize: 10, fontWeight: 700, color, marginBottom: 6, lineHeight: 1.2, minHeight: 24 }}>{trackerName}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: B.text, fontFamily: "monospace" }}>{total}</div>
+              <div style={{ fontSize: 9, color: B.muted, marginBottom: 6 }}>items tracked</div>
+              <div style={{ height: 5, background: light, borderRadius: 3, marginBottom: 4 }}>
+                <div style={{ height: 5, borderRadius: 3, width: `${pct}%`, background: color }} />
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9 }}>
+                <span style={{ color: B.muted }}>{pct}% done</span>
+                {delayed > 0 ? (
+                  <span style={{ color: "#c0392b", fontWeight: 700 }}>{delayed} delayed</span>
+                ) : total > 0 ? (
+                  <span style={{ color: "#0d7a32", fontWeight: 700 }}>on track</span>
+                ) : (
+                  <span style={{ color: B.muted }}>—</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TrackerDetailTable({ tracker, items, onClose }) {
+  const color = TRACKER_COLOR[tracker] || B.blue;
+  const isMilestone = tracker === "Milestone Payments";
+  const isManpower = tracker === "Manpower & Machinery";
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${B.border}`, borderLeft: `3px solid ${color}`, borderRadius: 12, overflow: "hidden", marginBottom: 16 }}>
+      <div style={{ padding: "10px 16px", borderBottom: `1px solid ${B.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color }}>{tracker} — {items.length} items</div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: B.muted, cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 0 }} aria-label="Close">×</button>
+      </div>
+      <div style={{ maxHeight: 420, overflowY: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+          <thead>
+            <tr style={{ position: "sticky", top: 0, background: B.bg, zIndex: 1 }}>
+              {["Item", "Status", "Plan", "Actual", "TAT", "Delay", isMilestone ? "Pay % / Amount" : isManpower ? "Qty" : "Remarks"].map((h) => (
+                <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontSize: 9, fontWeight: 700, color: B.muted, textTransform: "uppercase", letterSpacing: ".04em", borderBottom: `2px solid ${B.border}`, whiteSpace: "nowrap" }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, i) => (
+              <tr key={it.id} style={{ background: i % 2 === 0 ? "#fff" : B.bg }}>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, maxWidth: 260 }}>
+                  <div style={{ fontWeight: 600, color: B.text }}>{it.name || "—"}</div>
+                  {it.code && <div style={{ fontSize: 9, color: B.muted }}>{it.code}</div>}
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}` }}>
+                  <StatusBadge status={it.status} />
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, whiteSpace: "nowrap", color: B.muted }}>
+                  {dispDate(it.planStart)} → {dispDate(it.planEnd)}
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, whiteSpace: "nowrap", color: B.muted }}>
+                  {dispDate(it.actualStart)} → {dispDate(it.actualEnd)}
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, textAlign: "right", fontFamily: "monospace" }}>
+                  {typeof it.tatDays === "number" ? `${it.tatDays}d` : "—"}
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, textAlign: "right", fontFamily: "monospace", color: typeof it.delayDays === "number" && it.delayDays > 0 ? "#c0392b" : B.muted, fontWeight: typeof it.delayDays === "number" && it.delayDays > 0 ? 700 : 400 }}>
+                  {typeof it.delayDays === "number" ? `${it.delayDays}d` : "—"}
+                </td>
+                <td style={{ padding: "6px 10px", borderBottom: `1px solid ${B.border}`, color: B.muted, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {isMilestone
+                    ? `${it.payPct != null ? (it.payPct * 100).toFixed(1) + "%" : "—"} / ${it.totalAmt != null ? "₹" + it.totalAmt.toLocaleString("en-IN") : "—"}`
+                    : isManpower
+                    ? `${it.actualQty ?? "—"} / ${it.plannedQty ?? "—"}`
+                    : it.remarks || "—"}
+                </td>
+              </tr>
+            ))}
+            {items.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ padding: "20px", textAlign: "center", color: B.muted, fontStyle: "italic" }}>
+                  No items in this tracker for this project.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Catches render errors so a genuine crash shows the actual error text instead
+// of a blank white screen — makes any future bug reportable instead of just "it broke."
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 20, margin: 20, background: "#fef2f2", border: "1px solid #f5a5a5", borderRadius: 10, fontSize: 12, color: "#922b21" }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Something broke rendering this page</div>
+          <div style={{ fontFamily: "monospace", whiteSpace: "pre-wrap" }}>{String(this.state.error?.message || this.state.error)}</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function ProjectDetail({ projects, items }) {
   const [code, setCode] = useState(projects[0]?.code || "");
+  const [expandedTracker, setExpandedTracker] = useState(null);
   const project = projects.find((p) => p.code === code);
   const projectItems = useMemo(() => items.filter((it) => it.projectCode === code), [items, code]);
   const ranges = useMemo(() => computeStageRanges(projectItems), [projectItems]);
+  useEffect(() => setExpandedTracker(null), [code]);
 
   if (!project) {
     return <div style={{ padding: 20, fontSize: 12, color: B.muted }}>No projects on file yet.</div>;
@@ -1091,7 +1242,15 @@ function ProjectDetail({ projects, items }) {
 
       <ProjectJourney project={project} />
 
-      <TrackerSummary projectItems={projectItems} />
+      <TrackerSummary projectItems={projectItems} selected={expandedTracker} onSelect={setExpandedTracker} />
+
+      {expandedTracker && (
+        <TrackerDetailTable
+          tracker={expandedTracker}
+          items={projectItems.filter((it) => it.tracker === expandedTracker)}
+          onClose={() => setExpandedTracker(null)}
+        />
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
         <SmallCard label="Size" value={project.capacityKwp ? `${project.capacityKwp.toLocaleString("en-IN")} kWp` : "—"} accent={B.olive} />
@@ -1237,7 +1396,9 @@ export default function App() {
               <GanttExplorer items={items} projects={projects} />
             </>
           ) : (
-            <ProjectDetail projects={projects} items={items} />
+            <ErrorBoundary>
+              <ProjectDetail projects={projects} items={items} />
+            </ErrorBoundary>
           )}
         </div>
       )}
